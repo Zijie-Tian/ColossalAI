@@ -5,6 +5,7 @@ tracer.py:
     The implementation is partly inspired HuggingFace's fx tracer
 """
 import enum
+import time
 import functools
 import inspect
 import operator
@@ -29,12 +30,16 @@ from .registry import (
     meta_patched_module,
 )
 
+from colossalai.logging import get_dist_logger
+
+logger = get_dist_logger()
+
 __all__ = ['ColoTracer']
 
 
 class TracerType(enum.Enum):
     DEFAULT = 1
-    META = 2
+    META = 2        #! Meta Tensor Mode
 
 
 class ColoTracer(Tracer):
@@ -80,10 +85,38 @@ class ColoTracer(Tracer):
 
     _TORCH_METHODS_TO_PATCH = ["arange", "zeros", "ones", "full", "full_like", "eye", "empty", "tensor", "finfo"]
 
+    #> Overide the call_function method
+    def call_function(self, target, args, kwargs):        
+        # def timed_call_function(target, args, kwargs):
+        #     start_time = time.time()
+        #     result = super().call_function(target, args, kwargs)
+        #     end_time = time.time()
+        #     logger.debug(f"call_function: {target}, {args}, {kwargs}, {end_time - start_time}")
+        #     return result
+        
+        # return timed_call_function(target, args, kwargs)
+        
+        logger.debug(f"call_function: {target}, {args}, {kwargs}")
+        
+        return super().call_function(target, args, kwargs)
+
+    # def call_module(self, m, forward, args, kwargs):
+    #     def timed_call_module(m, forward, args, kwargs):
+    #         start_time = time.time()
+    #         result = super().call_module(m, forward, args, kwargs)
+    #         end_time = time.time()
+    #         logger.debug(f"call_module: {m}, {args}, {kwargs}, {end_time - start_time}")
+    #         return result
+            
+    #     return timed_call_module(m, forward, args, kwargs)
+
+    #> Each node first call this function, then create node and insert it into GRAPH.
     def create_proxy(self, kind, target, args, kwargs, name=None, type_expr=None, proxy_factory_fn=None) -> ColoProxy:
         """
         Create a proxy for different kinds of operations.
         """
+        
+        #> Args are previous module.
 
         if self.tracer_type == TracerType.DEFAULT:
             # since meta_args is not given
@@ -96,6 +129,7 @@ class ColoTracer(Tracer):
 
         # if no extra manipulation is applied, we just pass the origin arguments to create_proxy function
         # to create node on computation graph
+        # logger.debug(f"create_proxy: {kind}, {target}, {args}, {kwargs}, {name}, {type_expr}, {proxy_factory_fn}")
         origin_arguments = (kind, target, args, kwargs, name, type_expr, proxy_factory_fn)
         # dispatch the arguments generator depending on the kind and target in origin arguments.
         args_metas, _ = extract_meta(*args, **kwargs)
@@ -121,6 +155,8 @@ class ColoTracer(Tracer):
                 handle = bias_addition_method.get(method)(self, target, args, kwargs, function_to_substitute)
 
         elif kind == "call_module":
+            #! Can be called.
+            
             if not hasattr(self, "orig_forward"):
                 raise AttributeError(f"{self} does not have an attribute called orig_forward")
             self._disable_module_getattr = True
@@ -136,7 +172,7 @@ class ColoTracer(Tracer):
         if handle is not None:
             return handle.generate()
 
-        # create nodes using patched arguments
+        #> create nodes using patched arguments, this function create NODE.
         proxy = super().create_proxy(*origin_arguments)
         proxy: ColoProxy
         meta_out = self._meta_data_computing(
@@ -182,16 +218,22 @@ class ColoTracer(Tracer):
             return attr_val
 
     def call_module(self, m, forward, args, kwargs):
+        #! Set original forward function to fowward.
         self.orig_forward = forward
+        
         module_qualified_name = self.path_of_module(m)
+        
+        logger.debug(f"call_module: {m}, {args}, {kwargs}")
 
         # a leaf module is the torch.nn.Module subclasses starting with `torch.nn`
         # which means customized modules are not leaf module by default
         # if a customized or third-party module like apex.normalization.FusedRMSNorm is patched,
         # we should treat it as leaf module as well
         if meta_patched_module.has(m.__class__) or self.is_leaf_module(m, module_qualified_name):
+            #> Only small leaf module will call create_proxy.
             return self.create_proxy('call_module', module_qualified_name, args, kwargs)
         else:
+            logging.debug("Calling ")
             return forward(*args, **kwargs)
 
     def proxy(self, node) -> Proxy:
@@ -283,6 +325,7 @@ class ColoTracer(Tracer):
                     if meta_patched_module.has(mod_type):
                         meta_out = meta_patched_module.get(mod_type)(mod, *args_metas, **kwargs_metas)
                     else:
+                        #> Do Forward.
                         meta_out = self.orig_forward(*args_metas, **kwargs_metas)
                 finally:
                     self._disable_module_getattr = False
@@ -337,6 +380,8 @@ class ColoTracer(Tracer):
         sig = inspect.signature(root.forward)
         sig_names = set(sig.parameters.keys())
         meta_arg_names = set(meta_args.keys())
+        
+        # logger.debug(f"sig_names: {sig_names}")
 
         # update concrete args with default values
         non_meta_arg_names = sig_names - meta_arg_names
@@ -378,11 +423,13 @@ class ColoTracer(Tracer):
         self.patched_torch_tensor_methods = {}
         if self.tracer_type == TracerType.META:
             # wrap the torch tensor constructing methods so that they are captured in the graph
+            #> 包装torch张量构造方法，以便在图表中捕获它们, 包装之后都是代理
             self.patched_torch_tensor_methods = {
                 target: wrap_tensor_constructor_method(getattr(torch, target))
                 for target in self._TORCH_METHODS_TO_PATCH
             }
 
+            #> 包装之后都是代理
             # patch these methods to replace their original use
             for name, (wrapper, orig) in self.patched_torch_tensor_methods.items():
                 setattr(torch, name, wrapper)
@@ -390,6 +437,8 @@ class ColoTracer(Tracer):
             # cache these methods so that we can detect whether a method call
             # should be patched during tracing
             self.orig_torch_tensor_methods = [val[1] for val in self.patched_torch_tensor_methods.values()]
+            
+        # logger.debug(f"concrete_args: {concrete_args}")
 
         try:
             # to track the usage of torch.utils.checkpoint
@@ -398,8 +447,12 @@ class ColoTracer(Tracer):
 
         finally:
             # recover the patched methods
+            # logger.warning(f"Enter Finnally self.patched_torch_tensor_methods: {self.patched_torch_tensor_methods}")
             for name, (_, orig) in self.patched_torch_tensor_methods.items():
+                # logger.warning(f"Enter Finnally setattr torch.{name} = {orig}")
                 setattr(torch, name, orig)
+                
+        # logger.debug(f"Finished tracing")
 
         if self.tracer_type == TracerType.DEFAULT:
             return self.graph
@@ -407,6 +460,8 @@ class ColoTracer(Tracer):
         # This is necessary because concrete args are added as input to the traced module since
         # https://github.com/pytorch/pytorch/pull/55888.
         for node in self.graph.nodes:
+            # # logger.debug(f"node: {node}")
+            # logger.debug(f"node.op: {node.op}")
             if node.op == "placeholder":
                 # Removing default values for inputs as the forward pass will fail with them.
                 if node.target in non_concrete_arg_names:
@@ -482,6 +537,7 @@ def wrap_tensor_constructor_method(target):
             if isinstance(arg, Proxy):
                 return arg
             if isinstance(arg, (tuple, list)):
+                #> 递归地检查元组或列表中的每个元素是否为代理
                 return look_for_proxy(*arg)
 
         # find in keyword vars
@@ -489,9 +545,11 @@ def wrap_tensor_constructor_method(target):
             if isinstance(v, Proxy):
                 return v
             if isinstance(v, (tuple, list)):
+                #> 递归地检查元组或列表中的每个元素是否为代理
                 return look_for_proxy(*v)
         return None
 
+    #> functools.wraps(target) 装饰器用于包装函数，保留原始函数的元信息（如名称、文档字符串等）
     @functools.wraps(target)
     def wrapper(*args, **kwargs):
         proxy = look_for_proxy(*args, **kwargs)

@@ -4,7 +4,6 @@ from colossalai.elixir.chunk import ChunkFetcher
 
 from .storage import BufferStore
 
-
 def prefwd_postbwd_function(fetcher: ChunkFetcher, store: BufferStore):
 
     class PreFwdPostBwd(torch.autograd.Function):

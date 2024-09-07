@@ -127,6 +127,23 @@ class MemoryPool(object):
         self.__public_allocated_flag = False
         self.__private_allocated_flag = False
 
+    def allocate(self,
+                 public_dtype: torch.dtype = torch.float,
+                 public_block_size: int = 1024,
+                 public_block_number: int = 0,
+                 private_block_list: Iterable[BlockSpec] = ()):
+        """
+        Allocate public and private blocks for the memory pool.
+        """
+        assert not self.__public_allocated_flag
+        assert not self.__private_allocated_flag
+        assert public_block_number >= 0
+
+        self.allocate_public_blocks(public_block_number, BlockSpec(public_block_size, public_dtype))
+        self.allocate_private_blocks(private_block_list)
+
+        self.__allocate_flag = True
+
     def allocate_public_blocks(self, block_num: int, block_spec: BlockSpec = None):
         """
         Allocate public tensor blocks for the memory pool. This method will allocate public_block_number blocks with size equal to public_block_size.

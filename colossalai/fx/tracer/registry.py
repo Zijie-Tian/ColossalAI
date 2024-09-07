@@ -17,6 +17,7 @@ class PatchRegistry:
         target = self.store[source]
         return target
 
+    #> Check if the source is in the store's KEYs.
     def has(self, source):
         return source in self.store
 

@@ -15,9 +15,21 @@ class TensorState(Enum):
 
 # this includes the possible state transition in tensor state:
 # the item in the list is in the format of (old_state, new_state)
-# the complete state transtition is:
+# the complete state transition is:
 # free -> hold -> compute -> hold ->
 # -> compute -> hold_after_bwd -> ready_for_reduce
+#
+# State Transition Diagram:
+#
+#     +-----+     +-------+     +-------+     +--------------+
+#     |     |     |       |     |       |     |              |
+#     |FREE +<--->+  HOLD +<--->+COMPUTE+<--->+HOLD_AFTER_BWD+<--->READY_FOR_REDUCE
+#     |     |     |       |     |       |     |              |
+#     +-----+     +-------+     +-------+     +--------------+
+#        ^           |             |               |
+#        |           v             v               v
+#        +-----------+-------------+---------------+
+#
 LEGAL_TENSOR_STATE_UPDATE_LIST = [(TensorState.FREE, TensorState.HOLD), (TensorState.FREE, TensorState.COMPUTE),
                                   (TensorState.HOLD, TensorState.FREE), (TensorState.HOLD, TensorState.COMPUTE),
                                   (TensorState.COMPUTE, TensorState.HOLD),
@@ -25,7 +37,7 @@ LEGAL_TENSOR_STATE_UPDATE_LIST = [(TensorState.FREE, TensorState.HOLD), (TensorS
                                   (TensorState.HOLD_AFTER_BWD, TensorState.COMPUTE),
                                   (TensorState.HOLD_AFTER_BWD, TensorState.READY_FOR_REDUCE),
                                   (TensorState.READY_FOR_REDUCE, TensorState.HOLD)]
-
+ 
 
 def validate_tensor_state_update(old_state: TensorState, new_state: TensorState, raise_exception: bool = False) -> bool:
     """

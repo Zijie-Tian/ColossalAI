@@ -13,6 +13,9 @@ class ColoProxy(Proxy):
     """
     ColoProxy is a proxy class which uses meta tensor to handle data-dependent control flow. The original torch.fx proxy
     cannot be used to infer the condition statement, with this proxy, torch.fx can still run even with if statements.
+    
+    (PS : Proxy is a class which NOT really compute anything, it just record the operation and the arguments, 
+    the actual computation is done later.)
 
     Example::
 

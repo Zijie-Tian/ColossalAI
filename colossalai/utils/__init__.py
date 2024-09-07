@@ -33,6 +33,7 @@ from .memory import (
 )
 from .tensor_detector import TensorDetector
 from .timer import MultiTimer, Timer
+from .nvtx import nvtx_wrapper, NvtxRangeType
 
 __all__ = [
     'checkpoint',
@@ -72,4 +73,6 @@ __all__ = [
     'disposable',
     'colo_set_cpu_memory_capacity',
     'colo_get_cpu_memory_capacity',
+    'nvtx_wrapper',
+    'NvtxRangeType',
 ]

@@ -12,6 +12,7 @@ from torch import autograd, nn, optim
 from torch._C._distributed_rpc import PyRRef
 from torch.futures import Future
 
+from colossalai.logging import get_dist_logger
 from colossalai.pipeline.middleware import Partition, PartitionInputVal, PartitionOutputVal, Topo
 from colossalai.pipeline.pipeline_process_group import ppg
 from colossalai.pipeline.rpc.utils import (
@@ -24,6 +25,7 @@ from colossalai.pipeline.rpc.utils import (
     type_detail,
 )
 
+logger = get_dist_logger()
 
 class Phase(Enum):
     FORWARD = 0
@@ -182,6 +184,7 @@ class WorkerBase(ABC):
         partition_args = self.partition_args
         device = self.device
         with self.partition_condition_lock:
+            #! Assign module_partition to the current stage.
             self.module_partition: nn.Module = partition_fn(*partition_args).to(device)
             self.partition_condition_lock.notify_all()
 
@@ -355,6 +358,9 @@ class WorkerBase(ABC):
         """
         stage_id = self.pp_rank
         output = self._get_future_by_device()
+        
+        # logger.debug(f"Processing {microbatch_id} on Stage {stage_id} consumer to get data.")
+        
         if not self.use_middleware():
             producer_num = len(self.producer_stage_ids)
             subscribe_forward_futures: List[Future] = [None] * producer_num
@@ -413,8 +419,9 @@ class WorkerBase(ABC):
     # TODO(jiangziyue) Profile the side effect of the lock for lifecycle protection and consider a better one.
     def subscribe_producer(self, microbatch_id: int, forward_only: bool):
         key = UniqueKey(microbatch_id, Phase.FORWARD)
+
         with self.work_list_condition_lock:
-            if key not in self.work_list:
+            if key not in self.work_list:                
                 # On current PP middleware design for DAG, get_output_by_key used by _subscribe_producer
                 # can only be executed once for every producer-consumer stage pair, which is necessary
                 # to count the lifecycle of work_item. So, keeping the _subscribe_producer in the same
@@ -755,6 +762,7 @@ class WorkerBase(ABC):
 
         return args, kwargs
 
+    #> real forward function.
     def _consume_work_item_by_phase(self, work_item: WorkItem):
         phase = work_item.phase
         args = work_item.args
@@ -772,6 +780,8 @@ class WorkerBase(ABC):
             if not is_last_stage:
                 for stage_id in self.consumer_stage_ids:
                     consumer_worker_rref = self.pp_rank_to_worker_rref[stage_id]
+                    
+                    #> Regist all WorkItem.
                     consumer_worker_rref.remote().subscribe_producer(microbatch_id, forward_only)
 
             # sustain pipeline context
@@ -781,10 +791,12 @@ class WorkerBase(ABC):
 
             # parse and integrate args and kwargs
             if is_first_stage:
+                #> First stage input.
                 args = self._get_real_args_kwargs_fwd(args)
                 kwargs = self._get_real_args_kwargs_fwd(kwargs)
                 args_kwargs = (args, kwargs)
             else:
+                #> Get input from last stage.
                 args_kwargs = self._get_real_args_kwargs_fwd(args)
 
             args_kwargs = pyobj_map(args_kwargs, fn=lambda x: x.to(self.device).detach(),
@@ -800,6 +812,9 @@ class WorkerBase(ABC):
             use_checkpoint = None
 
             if forward_only:
+                logger.debug(f"Processing {microbatch_id} on Stage {self.module_partition.stage_id} consumer to get data.")
+                
+                #! Do Forward !!!!!!!!!!!!
                 with torch.no_grad():
                     consume_result = self.module_partition(*args, **kwargs)
 
@@ -807,6 +822,7 @@ class WorkerBase(ABC):
                     with self.label_lock:
                         self.label_lock.wait_for(lambda: microbatch_id in self.microbatch_id_to_labels)
                     labels = self.microbatch_id_to_labels.pop(microbatch_id)
+                    #> Compute Loss
                     loss: torch.Tensor = self.criterion(consume_result, labels)
                     if self.metric is not None:
                         metric_result = self.metric(consume_result, labels)
@@ -816,7 +832,7 @@ class WorkerBase(ABC):
                         metric_result = None
                     consume_result = [loss.item(), metric_result]
 
-                # last stage doesn't need to do checkpoint, for it will do backward instantly
+                #> Last stage doesn't need to do checkpoint, for it will do backward instantly
                 stage_input_args = None
                 stage_input_kwargs = None
                 stage_outputs = consume_result
@@ -850,6 +866,7 @@ class WorkerBase(ABC):
                 stage_outputs = loss
                 use_checkpoint = False
 
+            #! Do Backward !!!!!!!!!!!!
             if not forward_only:
                 self.microbatch_id_to_backward_cache[microbatch_id] = BackwardCache(stage_input_args,
                                                                                     stage_input_kwargs,
@@ -978,6 +995,7 @@ class WorkerBase(ABC):
                 self.output_list[work_item_key] = work_item
                 self.output_list_condition_lock.notify_all()
 
+            #> Execute WorkItem.
             consume_result = self._consume_work_item_by_phase(work_item)
 
             with self.work_list_condition_lock:
@@ -1011,7 +1029,7 @@ class WorkerBase(ABC):
         self._hook_before_step()
         self.optimizer.step()
         self.optimizer.zero_grad()
-
+        
 
 class PipelineEngineBase(ABC, nn.Module):
 
@@ -1102,19 +1120,24 @@ class PipelineEngineBase(ABC, nn.Module):
 
         for pp_rank in range(len(self.pp_rank_to_rpc_worker_id)):
             partition_id = self.pp_rank_to_module_partition_id[pp_rank]
+            
+            #> Prepare partition args for the worker
             partition_args = (partition_id, chunk, actual_stage_num)
             rpc_worker_id = self.pp_rank_to_rpc_worker_id[pp_rank]
             if device[:4] == 'cuda':
                 device = f'cuda:{rpc_worker_id}'
+                
+            #> Generate a remote reference to the worker
             self.pp_rank_to_worker_rref[pp_rank] = rpc.remote(rpc_worker_id,
                                                               worker_type,
                                                               args=(partition_fn, partition_args, pp_rank,
                                                                     actual_stage_num, num_microbatches, device,
                                                                     criterion, metric, checkpoint, data_process_func))
 
-        # let each worker know global worker rref (include itself)
+        #> let each worker know global worker rref (include itself)
         sync_futs = []
         for pp_rank in self.pp_rank_to_worker_rref:
+            #> Do a remote call.
             fut = self.pp_rank_to_worker_rref[pp_rank].rpc_async(timeout=0).sync_global_worker_rrefs(
                 self.pp_rank_to_worker_rref)
             sync_futs.append(fut)
@@ -1197,6 +1220,7 @@ class PipelineEngineBase(ABC, nn.Module):
         key = UniqueKey(microbatch_id, Phase.FORWARD)
         for pp_rank in output_pp_ranks:
             worker_rref = self.pp_rank_to_worker_rref[pp_rank]
+            #> Async get output by key.
             ret_future[pp_rank][microbatch_id] = worker_rref.rpc_async().get_output_by_key(key)
 
     def _ensure_backward(self, forward_only: bool, input_pp_ranks: List[int]):

@@ -40,7 +40,7 @@ def split_module(
     root_m: torch.nn.Module,
     split_callback: Callable[[torch.fx.node.Node], int],
     merge_output=False,
-):
+) -> GraphModule:
     """
     Adapted from https://github.com/pytorch/pytorch/blob/master/torch/fx/passes/split_module.py
     Creates subgraphs out of main graph
@@ -117,17 +117,20 @@ def split_module(
     partitions: Dict[str, Partition] = {}
     orig_nodes: Dict[str, torch.fx.node.Node] = {}
 
+    #> 记录跨分区的使用，将def_node的输出记录为use_node的输入，用来连接两个分区
     def record_cross_partition_use(def_node: torch.fx.node.Node,
                                    use_node: Optional[torch.fx.node.Node]):    # noqa: B950
         def_partition_name = getattr(def_node, '_fx_partition', None)
         use_partition_name = getattr(use_node, '_fx_partition', None)
         if def_partition_name != use_partition_name:
+            #> 如果def_partition_name不为空，则将def_node的输出记录为def_partition的输出
             if def_partition_name is not None:
                 def_partition = partitions[def_partition_name]
                 def_partition.outputs.setdefault(def_node.name)
                 if use_partition_name is not None:
                     def_partition.partition_dependents.setdefault(use_partition_name)
 
+            #> 如果use_partition_name不为空，则将def_node的输出记录为use_node的输入，用来连接两个分区
             if use_partition_name is not None:
                 use_partition = partitions[use_partition_name]
                 use_partition.inputs.setdefault(def_node.name)
@@ -135,8 +138,8 @@ def split_module(
                     use_partition.partitions_dependent_on.setdefault(def_partition_name)
 
     def record_output(def_node: torch.fx.node.Node, use_node: Optional[torch.fx.node.Node]):    # noqa: B950
-        def_partition_name = getattr(def_node, "_fx_partition", None)
-        use_partition_name = getattr(use_node, "_fx_partition", None)
+        def_partition_name = getattr(def_node, "_fx_partition", None)   #> 获取def_node的partition name
+        use_partition_name = getattr(use_node, "_fx_partition", None)   #> 获取use_node的partition name
         if def_partition_name != use_partition_name:
             if def_partition_name is not None:
                 def_partition = partitions[def_partition_name]
@@ -159,14 +162,19 @@ def split_module(
     for node in m.graph.nodes:
         orig_nodes[node.name] = node
 
+        #> 跳过placeholder节点
         if node.op in ["placeholder"]:
             continue
         if node.op == 'output':
             if merge_output:
+                #> 将output节点的输出记录为output节点的前一个节点的输出
                 torch.fx.graph.map_arg(node.args[0], lambda n: record_output(n, node.prev))
             else:
+                #> 将output节点的输出记录为output节点的前一个节点的输出
                 torch.fx.graph.map_arg(node.args[0], lambda n: record_cross_partition_use(n, None))
             continue
+        
+        #> 以下就是call_module和call_function的节点
         partition_name = str(split_callback(node))
 
         # add node to partitions
@@ -180,13 +188,13 @@ def split_module(
         torch.fx.graph.map_arg(node.args, lambda def_node: record_cross_partition_use(def_node, node))
         torch.fx.graph.map_arg(node.kwargs, lambda def_node: record_cross_partition_use(def_node, node))    # noqa: B950
 
-    # find partitions with no dependencies
+    #> find partitions with no dependencies
     root_partitions: List[str] = []
     for partition_name, partition in partitions.items():
         if not len(partition.partitions_dependent_on):
             root_partitions.append(partition_name)
 
-    # check partitions for circular dependencies and create topological partition ordering
+    #> check partitions for circular dependencies and create topological partition ordering
     sorted_partitions: List[str] = []
     while root_partitions:
         root_partition = root_partitions.pop()

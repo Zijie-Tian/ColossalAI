@@ -18,7 +18,7 @@ from colossalai.testing import parameterize, rerun_if_address_is_in_use, spawn
 
 # global variable for model created
 batch_size = 16
-dim = 10
+dim = 1024
 rpc_is_initialized = _is_current_rpc_agent_set
 
 
@@ -28,7 +28,10 @@ def create_partition_module(pp_rank: int, stage_num: int, model, data_kwargs):
     meta_args = {k: v.to('meta') for k, v in data_kwargs.items()}
     graph = tracer.trace(root=model, meta_args=meta_args)
     gm = torch.fx.GraphModule(model, graph, model.__class__.__name__)
+    
+    #> 在每个分区的输入输出之间插入split和gather节点
     annotated_model = balanced_split_pass(gm, stage_num)
+
     top_module, split_submodules = split_with_split_nodes_pass(annotated_model, merge_output=True)
     topo = get_fx_topology(top_module)
     for submodule in split_submodules:
@@ -48,7 +51,7 @@ def run_master(model_cls, world_size, forward_only):
 
     epoch = 3
     device = 'cuda'
-    stage_num = world_size
+    stage_num = world_size * 1024
     chunk = 1
     num_microbatches = 8
     use_checkpoint = 'store_true'
@@ -82,7 +85,8 @@ def run_master(model_cls, world_size, forward_only):
         pass
 
     data_kwargs = data_gen()
-
+    
+    #> Here we split the model.
     engine = OneFOneBPipelineEngine(
         partition_fn=partial(partition, model, data_kwargs),
         stage_num=stage_num,
@@ -108,6 +112,7 @@ def run_worker(rank, world_size, port, model_cls, forward_only, master_func):
 
     disable_existing_loggers()
 
+    #> Run function 'run_master' in each process
     launch(dict(), rank, world_size, master_addr, master_port, 'nccl', verbose=False)
     ppg.set_global_info(rank=rank,
                         world_size=world_size,

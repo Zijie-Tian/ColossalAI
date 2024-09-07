@@ -155,6 +155,7 @@ def generate_tf_order(model: nn.Module, inp: Dict, step_fn: Callable, dtype: tor
             meta_t.requires_grad = t.requires_grad
         return meta_t
 
+    #! Make a meta model, to profile the tensor.
     model = meta_copy(model, mtensor_trans)
     for name, param in model.named_parameters():
         param.param_name = name

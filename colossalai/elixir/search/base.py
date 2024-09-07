@@ -115,6 +115,9 @@ class SearchBase(ABC):
         return plans
 
     def allocate_chunk_group(self, chunk_plans: List[ChunkPlan]) -> ChunkGroup:
+        """
+        Allocate a chunk group from the memory pool.
+        """
         block_require_list = list()
         for plan in chunk_plans:
             kwargs = plan.kwargs
@@ -129,7 +132,7 @@ class SearchBase(ABC):
 
         if self.verbose:
             print_rank_0(
-                f'Memory pool (rcache): {mp}\n\tblock size -> {mp.public_block_size}, block number -> {mp.public_free_cnt}'
+                f'Memory pool (rcache): {mp}\n\tblock size -> {mp.public_block_size}, block number -> {mp.public_free_count}'
             )
 
         return ChunkGroup(mp)

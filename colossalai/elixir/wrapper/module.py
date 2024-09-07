@@ -16,6 +16,7 @@ from colossalai.elixir.hook import BufferStore, HookParam
 from colossalai.elixir.search import SearchResult
 from colossalai.elixir.tensor import OutplaceTensor
 from colossalai.utils.model.experimental import LazyTensor
+from colossalai.utils import nvtx_wrapper, NvtxRangeType
 
 
 def calc_module_buffer(m: nn.Module, fused_check_func: Callable) -> int:
@@ -88,6 +89,8 @@ class ElixirModule(nn.Module):
             assert name in self.grad_state_dict
             # param.debug_name = name
             param.register_hook(partial(self._gradient_handler, param=param))
+            
+            #> This line enable HookParam to be used in the fwd and bwd.
             param.__class__ = HookParam
 
     def __init_chunk_group(self, sr: SearchResult):
@@ -109,6 +112,7 @@ class ElixirModule(nn.Module):
                 to_dtype = self.dtype if tensor.is_floating_point() else tensor.dtype
                 tensor.data = tensor.data.to(dtype=to_dtype, device=gpu_device())
 
+        #> Create GPU memory pool
         empty_mp = MemoryPool('cuda')
         empty_mp.allocate()
 
@@ -232,6 +236,7 @@ class ElixirModule(nn.Module):
             param_group.release_chunk(maybe_chunk)
         self._deattach_fetcher()
 
+    @nvtx_wrapper(NvtxRangeType.FORWARD)
     def forward(self, *args, **kwargs):
         if torch.is_grad_enabled():
             inference_mode = False
@@ -254,6 +259,7 @@ class ElixirModule(nn.Module):
         args = tree_map(to_outplace_tensor, args)
         kwargs = tree_map(to_outplace_tensor, kwargs)
 
+        #> Call forward, But First enter the parameter's __torch_function__
         outputs = self.module(*args, **kwargs)
         if self.output_fp32:
             outputs = outputs.float()
@@ -263,6 +269,7 @@ class ElixirModule(nn.Module):
 
         return outputs
 
+    @nvtx_wrapper(NvtxRangeType.BACKWARD)
     def backward(self, loss: torch.Tensor):
         loss.backward()
         # reset the fetcher for the next step

@@ -7,6 +7,8 @@ from torch.utils._pytree import tree_map
 from colossalai.elixir.chunk import ChunkFetcher
 from colossalai.elixir.kernels import fused_torch_functions
 from colossalai.elixir.tensor import OutplaceTensor, is_no_hook_op, to_outplace_tensor
+from colossalai.utils import nvtx_wrapper, NvtxRangeType
+from colossalai.logging import get_dist_logger
 
 from .functions import postfwd_prebwd_function, prefwd_postbwd_function
 from .storage import BufferStore
@@ -50,6 +52,7 @@ class HookParam(OutplaceTensor, nn.Parameter):
         HookParam.use_fused_kernel = False
 
     @classmethod
+    @nvtx_wrapper(NvtxRangeType.OTHER)
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
@@ -76,12 +79,17 @@ class HookParam(OutplaceTensor, nn.Parameter):
 
         def replace_param(x):
             if isinstance(x, HookParam):
+                #> Here call fetcher to get the chunk.
                 return new_params[params_to_index[x]]
             return x
 
+        #> Real torch function call.
         with torch._C.DisableTorchFunction():
+            #> Change the function to the fused kernel if possible.
             if HookParam.use_fused_kernel and func in fused_torch_functions:
                 func = fused_torch_functions.get(func)
+            #> Wrap the function with nvtx range.
+            func = nvtx_wrapper(NvtxRangeType.COMPUTE)(func)
             ret = func(*tree_map(replace_param, args), **tree_map(replace_param, kwargs))
         if not isinstance(ret, tuple):
             ret = (ret,)
@@ -91,6 +99,7 @@ class HookParam(OutplaceTensor, nn.Parameter):
             ptr_set.add(p.data_ptr())
 
         def clone_inplace_tensor(x):
+            #> Clone the tensor if it is an inplace operation.
             if isinstance(x, torch.Tensor):
                 start_point = x.data_ptr() - x.element_size() * x.storage_offset()
                 if start_point in ptr_set:
@@ -98,6 +107,7 @@ class HookParam(OutplaceTensor, nn.Parameter):
             return x
 
         ret = tree_map(clone_inplace_tensor, ret)
+        #> Hook write by self.
         ret = HookParam.post_fwd_func(params, *ret)
 
         def convert(t):

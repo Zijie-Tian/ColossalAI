@@ -230,7 +230,7 @@ def avgnode_split_pass(gm: torch.fx.GraphModule, pp_size: int):
 
 def balanced_split_pass(gm: torch.fx.GraphModule, pp_size: int):
     """
-    In balanced_split_pass, we split module by the size of parameters(weights+bias).
+    > In balanced_split_pass, we split module by the size of parameters(weights+bias).
     """
     mod_graph = gm.graph
     total_param_amount = 0
@@ -241,21 +241,29 @@ def balanced_split_pass(gm: torch.fx.GraphModule, pp_size: int):
     for node in mod_graph.nodes:
         if pp_size <= 1:
             break
+        
+        #> 处理一个module的parameters
         if node.op == "call_module":
             target_module = node.graph.owning_module.get_submodule(node.target)
             for param in target_module.parameters():
                 accumulate_param_amount += param.numel()
+        
+        #> 如果累加的参数数量超过了每个分区的参数数量，则需要插入一个split节点
         if accumulate_param_amount >= params_per_partition:
             accumulate_param_amount = 0
             pp_size -= 1
             # If the next node is output node, we will insert split annotation before
             # node to make sure there is at least one node in last partition.
+            
+            #> pipe_split 这里就是一个标记，表示在这里分割 Pipeline。
             if node.next.op == 'output':
                 with mod_graph.inserting_before(node):
                     split_node = mod_graph.create_node('call_function', pipe_split)
             else:
                 with mod_graph.inserting_after(node):
                     split_node = mod_graph.create_node('call_function', pipe_split)
+    
+    #> 如果还有剩余的partition，则继续分割
     if pp_size > 1:
         node_counter = 0
         for node in mod_graph.nodes:
@@ -271,6 +279,7 @@ def balanced_split_pass(gm: torch.fx.GraphModule, pp_size: int):
                 with mod_graph.inserting_before(node):
                     split_node = mod_graph.create_node('call_function', pipe_split)
 
+    #> 重新编译计算图
     gm.recompile()
     return gm
 
@@ -344,8 +353,10 @@ def split_with_split_nodes_pass(annotated_gm: torch.fx.GraphModule, merge_output
     # In future: graph to partitions -> analyzing partition IR -> recombining partitions to get best performance -> assign partition ID to each node
     part_idx = 0
 
+    #> 这只是一个计数器，用于标记pipeline的分割
     def split_callback(n: torch.fx.Node):
         nonlocal part_idx
+        #> 检查是不是pipe_split，用于进行pipeline的分割
         if (n.op, n.target) == ('call_function', pipe_split):
             part_idx += 1
         return part_idx

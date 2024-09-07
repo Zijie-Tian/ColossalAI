@@ -9,6 +9,17 @@ __all__ = ['is_element_in_list', 'extract_meta']
 
 
 def is_element_in_list(elements: Union[List[Any], Any], list_: List[Any]):
+    """
+    检查一个或多个元素是否在给定的列表中。
+
+    Args:
+        elements (Union[List[Any], Any]): 要检查的元素，可以是单个元素或元素的列表、元组或集合。
+        list_ (List[Any]): 要检查的目标列表。
+
+    Returns:
+        Tuple[bool, Any]: 如果所有元素都在列表中，返回 (True, None)；
+                          如果有任一元素不在列表中，返回 (False, 不在列表中的第一个元素)。
+    """
     if isinstance(elements, (tuple, list, set)):
         for ele in elements:
             if ele not in list_:

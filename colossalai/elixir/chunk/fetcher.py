@@ -5,6 +5,8 @@ import torch
 from .core import Chunk, ChunkGroup, TensorBlock, TensorState
 from .scheduler import ChunkScheduler
 
+from colossalai.utils import nvtx_wrapper, NvtxRangeType
+
 
 class ChunkFetcher(object):
     """ChunkFetcher is responsible for fetching and reducing chunks during training.
@@ -59,6 +61,7 @@ class ChunkFetcher(object):
 
         self.scheduler.clear()
 
+    @nvtx_wrapper(NvtxRangeType.COMMUNICATION)
     def trans_to_compute(self, tensors: List[torch.Tensor]):
         """Transform tensors to COMPUTE state.
         This function should be called before the compute operators."""
